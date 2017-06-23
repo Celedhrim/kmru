@@ -1,0 +1,150 @@
+#!/usr/bin/env ruby
+
+#require 'bundler/setup'
+require 'kmru'
+require 'rbconfig'
+require 'optparse'
+require 'ruby-progressbar'
+
+# not design for windows
+is_windows = (RbConfig::CONFIG['host_os'] =~ /mswin|mingw|cygwin/)
+if is_windows
+  puts 'Sorry not design for windows'
+  exit 1
+end
+
+# function to put messages
+def myputs(msg)
+  if $options[:mode] == 'cron'
+    puts msg
+  else
+    $progressbar.log msg
+  end
+end
+
+CONFFILE = '~/.config/kmru.conf'
+conffile = File.expand_path(CONFFILE)
+
+# Load config file
+$conf = Kmru.confread(conffile)
+
+# Script command line arguments
+$options = { mode: 'last',
+             number: $conf['number'],
+             verbose: false,
+             host: $conf['host'],
+             port: $conf['port'],
+             user: $conf['user'],
+             pass: $conf['pass'] }
+
+parser = OptionParser.new do |opts|
+  opts.banner = 'Usage: kmru [options]'
+  opts.on('-m', '--mode MODE', ["last", "random", "cron", "all"], 'Choose which mode to use',
+          "  - last   : proceed most recent movies ( default)",
+          "  - random : Take N random movies",
+          "  - cron   : like random but with minimal output",
+          "  - all    : procees the entire library") do |setting|
+    $options[:mode] = setting;
+  end
+
+  opts.on('-n', '--number NUM', Integer, 'Check NUM movies') do |setting|
+    $options[:number] = setting;
+  end
+
+  opts.on('-v', '--verbose', 'Verbose output (show nochange movies too)') do |setting|
+    $options[:verbose] = setting;
+  end
+
+  opts.on('-h', '--help', 'Displays Help') do
+    puts opts
+    exit
+  end
+
+  opts.separator ""
+  opts.separator "Host options (you should use config file) :"
+  opts.separator ""
+
+  opts.on('-H', '--host HOST', 'Kodi instance address') do |setting|
+    $options[:host] = setting;
+  end
+
+  opts.on('-P', '--port', 'Kodi instance port') do |setting|
+    $options[:port] = setting;
+  end
+
+  opts.on('-u', '--user USERNAME', 'Kodi instance auth user') do |setting|
+    $options[:user] = setting;
+  end
+
+  opts.on('-p', '--pass PASSWORD', 'Kodi instance auth password') do |setting|
+    $options[:pass] = setting;
+  end
+end
+
+parser.parse!
+
+#Test connection to kodi api
+unless Kmru.koditestconn
+  puts "Unable to connect KODI"
+  exit 1
+end
+
+movies = Kmru.getmovies
+
+$progressbar = ProgressBar.create(:length => 80, :format => '%e |%b>%i| %P%% %t') unless $options[:mode] == "cron"
+myputs('-'*80) unless $options[:cron]
+
+
+x = 1
+step = (x*100.0)/movies.count
+
+movies.each do |m|
+  details = Kmru.getmoviedetails(m['movieid'])
+  if details['imdbnumber'].match(/(\d\d\d\d\d\d\d)/)
+    infos = Kmru.imdbdetails(details['imdbnumber'].match(/(\d\d\d\d\d\d\d)/))
+    if details['rating'].round(1) != infos.rating
+      myputs("| Progress: #{x}/#{movies.count}")
+      Kmru.setmoviedetails(m['movieid'],details['imdbnumber'],infos.rating,infos.votes)
+      myputs("| Update #{details['label']}")
+      myputs("| Rating: #{details['rating'].round(1)} => #{infos.rating}")
+      myputs("| Votes : #{details['votes']} => #{infos.votes}")
+      myputs('-'*80)
+    else
+      if $options[:verbose]
+        myputs("| Progress: #{x}/#{movies.count}")
+        myputs("| No change => #{details['label']}")
+        myputs('-'*80)
+      end
+    end
+  else
+    s = Imdb::Search.new("#{CGI::escape(details['label'])} #{details['year']}")
+    infos = s.movies
+    if infos.size > 0
+      begin
+        while infos.first.title.include? "(TV" or infos.first.title.include? "(Short)" or infos.first.title.include? "(in developement)" do
+          infos.shift
+        end
+      rescue
+        myputs("| error getting #{details['label']} infos on IMDB")
+      end
+    end
+
+    if infos.size > 0
+      myputs("| Found a match tt#{infos.first.id} => #{infos.first.title}")
+      Kmru.setmoviedetails(m['movieid'],"tt#{infos.first.id}",infos.first.rating,infos.first.votes)
+      myputs("| Update #{details['label']} with id tt#{infos.first.id}")
+      myputs("| Rating: #{infos.first.rating}")
+      myputs("| Votes : #{infos.first.votes}")
+      myputs('-'*80)
+    else
+      myputs("| No match found for #{details['label']}")
+			myputs("| skipping :(")
+			myputs('-'*80)
+    end
+  end
+  unless $options[:mode] == "cron" then
+ 		x == movies.count ? $progressbar.finish : $progressbar.progress += step
+  end
+ 	x = x+1
+
+end
